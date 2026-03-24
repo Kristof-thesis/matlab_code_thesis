@@ -1,133 +1,107 @@
-%% PINN_STIFFNESS_CALC_INTEGRATED.m
+%% PINN_DUAL_TARGET_FINAL.m
 % -------------------------------------------------------------------------
-% 1. Adatkinyerés
+% 1. Adatkinyerés (YawAcc hozzáadva a targetekhez)
 % -------------------------------------------------------------------------
-if ~exist('out_vx', 'var')
-    error('HIBA: Nem található az out_vx változó! Indítsa el a szimulációt.');
-end
-
-all_tout       = out_vx.Time;
-all_sim_vx     = out_vx.Data;
-all_sim_vy     = out_vy.Data;
-all_sim_omega  = out_omega.Data;
-all_sim_ay     = out_ay.Data;
-all_sim_delta  = out_delta.Data;
-all_sim_FyF    = out_FyF.Data;
-all_sim_FyR    = out_FyR.Data;
-all_sim_slipF  = out_slipF.Data;
-all_sim_slipR  = out_slipR.Data;
+f_col = @(x) x(:); 
+all_tout       = f_col(out_vx.Time);
+all_sim_vx     = f_col(out_vx.Data);
+all_sim_vy     = f_col(out_vy.Data);
+all_sim_omega  = f_col(out_omega.Data);
+all_sim_ay     = f_col(out_ay.Data);
+all_sim_delta  = f_col(out_delta.Data);
+all_sim_yawacc = f_col(out_yawacc.Data); 
+all_sim_ax     = f_col(out_ax.Data);     
 
 % -------------------------------------------------------------------------
-% 2. Cf és Cr SZÁMÍTÁSA
+% 2. Bemenetek és Targetek összeállítása
 % -------------------------------------------------------------------------
-validF = abs(all_sim_slipF) > 0.005; 
-validR = abs(all_sim_slipR) > 0.005;
+% Bemenetek: [delta; vx; omega; ay; ax] -> (yawacc kikerült)
+inputs = [all_sim_delta, all_sim_vx, all_sim_omega, all_sim_ay, all_sim_ax]';
 
-Cf_calc = abs(mean(all_sim_FyF(validF) ./ all_sim_slipF(validF)));
-Cr_calc = abs(mean(all_sim_FyR(validR) ./ all_sim_slipR(validR)));
+% Targetek: [vy; yawacc] -> (Két kimenet!)
+targets = [all_sim_vy, all_sim_yawacc]';
 
-if isnan(Cf_calc) || isinf(Cf_calc), Cf_calc = 150000; end
-if isnan(Cr_calc) || isinf(Cr_calc), Cr_calc = 160000; end
+% Normalizálás
+mu_in = mean(inputs, 2); sigma_in = std(inputs, 0, 2) + 1e-6;
+inputs_norm = (inputs - mu_in) ./ sigma_in;
 
-fprintf('Számított kanyarmerevségek:\n Cf: %.2f N/rad\n Cr: %.2f N/rad\n', Cf_calc, Cr_calc);
-
-% -------------------------------------------------------------------------
-% 3. PINN Konfiguráció
-% -------------------------------------------------------------------------
-inputs = [all_sim_delta'; all_sim_vx'; all_sim_omega'; all_sim_ay'; all_sim_yawacc'; all_sim_ax'];
-targets = all_sim_vy';
-
-params.m  = 2108.0;      
-params.Iz = 3954.288;    
-params.lf = 1.47;        
-params.lr = 1.50;        
-params.Cf = Cf_calc;    
-params.Cr = Cr_calc;    
-
-dlInputs = dlarray(inputs, 'CB');
+dlInputs = dlarray(inputs_norm, 'CB');
 dlTargets = dlarray(targets, 'CB');
 
-% Hálózat - picit több neuron a jobb illeszkedésért
+% Pacejka paraméterek (maradnak a cftool-os értékek)
+params.B = 25.046; params.C = 1.138; params.D = 8272.4;
+params.m = 2108.0; params.Iz = 3954.288; params.lf = 1.47; params.lr = 1.50;
+
+% -------------------------------------------------------------------------
+% 3. Hálózat és Tanítás (Kimeneti réteg mérete most már 2)
+% -------------------------------------------------------------------------
 net = dlnetwork([
     featureInputLayer(size(inputs, 1))
-    fullyConnectedLayer(35)
+    fullyConnectedLayer(40) % Picit növelve a kapacitás a két cél miatt
     tanhLayer
-    fullyConnectedLayer(35)
+    fullyConnectedLayer(40)
     tanhLayer
-    fullyConnectedLayer(size(targets, 1))
+    fullyConnectedLayer(2) % Kimenet: [vy; yawacc]
 ]);
 
-% Tanítási paraméterek
-numEpochs = 2000;      
-learningRate = 0.002;  
-lambda = 0.1;          
+numEpochs = 2000; learningRate = 0.002; lambda = 0.05;
+velocity = []; squaredGradient = [];
 
-velocity = [];
-squaredGradient = [];
-lossHistory = zeros(numEpochs, 1);
-
-% -------------------------------------------------------------------------
-% 4. Tanítás (KIÍRÁSSAL)
-% -------------------------------------------------------------------------
-disp('PINN tanítása folyamatban...');
-
-tic; % Időmérés indítása
+disp('PINN tanítása (v_y és YawAcc becslése)...');
+tic;
 for epoch = 1:numEpochs
-    [loss, gradients] = dlfeval(@modelLoss, net, dlInputs, dlTargets, params, lambda);
+    [loss, gradients] = dlfeval(@modelLoss, net, dlInputs, dlTargets, params, lambda, inputs);
     [net, velocity, squaredGradient] = adamupdate(net, gradients, velocity, squaredGradient, epoch, learningRate);
-    
-    lossVal = extractdata(loss);
-    lossHistory(epoch) = lossVal;
-    
-    
-    if mod(epoch, 100) == 0 || epoch == 1
-        fprintf('Epoch %4d / %d | Loss: %.8f\n', epoch, numEpochs, lossVal);
+    if mod(epoch, 500) == 0 || epoch == 1
+        fprintf('Epoch %4d | Loss: %.8f\n', epoch, extractdata(loss));
     end
 end
-toc; % Időmérés vége
+toc;
 
 % -------------------------------------------------------------------------
-% 5. Plotolás
+% 4. Plotolás (Két külön ábra a két kimenetnek)
 % -------------------------------------------------------------------------
-vy_pred = extractdata(forward(net, dlInputs));
+predictions = extractdata(forward(net, dlInputs));
+vy_pred = predictions(1, :);
+ya_pred = predictions(2, :);
 
-figure('Name', 'PINN Végeredmény Stabil');
-plot(all_tout, targets, 'b', 'LineWidth', 1.8, 'DisplayName', 'CarMaker');
-hold on;
-plot(all_tout, vy_pred, 'r--', 'LineWidth', 1.5, 'DisplayName', 'PINN');
-title(sprintf('Vy becslés (lambda=%.1f, Cf=%.0f)', lambda, Cf_calc));
-xlabel('Idő [s]'); ylabel('m/s');
-legend; grid on;
+% Vy plot
+figure
+plot(all_tout, targets(1,:), 'b', 'LineWidth', 2); hold on;
+plot(all_tout, vy_pred, 'r--');
+title('Vy (Oldalirányú sebesség) becslése'); ylabel('m/s'); grid on; legend('Ref','PINN');
+
+% YawAcc plot
+figure
+plot(all_tout, targets(2,:), 'b', 'LineWidth', 2); hold on;
+plot(all_tout, ya_pred, 'g--');
+title('YawAcc (Legördülési gyorsulás) becslése'); ylabel('rad/s^2'); xlabel('Idő [s]'); grid on; legend('Ref','PINN');
 
 % -------------------------------------------------------------------------
-% 6. ModelLoss
+% 5. ModelLoss (Két kimenet kezelése)
 % -------------------------------------------------------------------------
-function [loss, gradients] = modelLoss(net, dlInputs, dlTargets, p, lambda)
-    vy_pred = forward(net, dlInputs);
-    lossData = l2loss(vy_pred, dlTargets);
+function [loss, gradients] = modelLoss(net, dlInputs, dlTargets, p, lambda, raw_in)
+    preds = forward(net, dlInputs);
+    vy_pred = preds(1, :);
+    ya_pred = preds(2, :);
     
-    % Indexek: 1:delta, 2:vx, 3:omega, 4:ay, 5:yawacc
-    delta    = dlInputs(1, :);
-    vx       = max(dlInputs(2, :), 0.5);
-    omega    = dlInputs(3, :);
-    ay_meas  = dlInputs(4, :);
-    yacc_meas = dlInputs(5, :);
+    % Adat-alapú hiba (mindkét kimenetre)
+    lossData = l2loss(vy_pred, dlTargets(1, :)) + l2loss(ya_pred, dlTargets(2, :));
     
-    % Szlipek és Erők
-    alfa_f = delta - (vy_pred + (p.lf * omega)) ./ vx;
-    alfa_r = (p.lr * omega - vy_pred) ./ vx;
-    Fyf_p = p.Cf * alfa_f;
-    Fyr_p = p.Cr * alfa_r;
+    % Fizikai számítások
+    delta = raw_in(1, :); vx = max(raw_in(2, :), 0.8); omega = raw_in(3, :); ay_meas = raw_in(4, :);
     
-    % 1. Laterális gyorsulás hiba
-    lossAccel = l2loss((Fyf_p + Fyr_p) / p.m, ay_meas);
+    af = delta - (vy_pred + (p.lf * omega)) ./ vx;
+    ar = (p.lr * omega - vy_pred) ./ vx;
     
-    % 2. Nyomaték hiba SKÁLÁZVA 
-    lossMomentum = l2loss((Fyf_p * p.lf - Fyr_p * p.lr) / p.Iz, yacc_meas);
+    Fyf = p.D * sin(p.C * atan(p.B * af));
+    Fyr = p.D * sin(p.C * atan(p.B * ar));
     
-    % Összesített fizikai hiba 
-    lossPhysics = 0.5 * lossAccel + 0.5 * lossMomentum;
+    % Fizikai kényszer: a hálózat által becsült ya_pred-et is összevetjük a fizikai képlettel!
+    lossAccel = l2loss((Fyf + Fyr) / p.m, ay_meas);
+    lossMomentum = l2loss((Fyf * p.lf - Fyr * p.lr) / p.Iz, ya_pred); % A becsült yawacc-ot kényszerítjük
     
-    loss = lossData + lambda * lossPhysics;
+    lossPhys = 0.5 * lossAccel + 0.5 * lossMomentum;
+    loss = lossData + lambda * lossPhys;
     gradients = dlgradient(loss, net.Learnables);
 end
