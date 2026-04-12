@@ -29,7 +29,7 @@ dlInputs = dlarray(inputs_norm, 'CB');
 dlTargets = dlarray(targets, 'CB');
 
 % Pacejka paraméterek 
-params.B = 25.046; params.C = 1.138; params.D = 8272.4;
+params.B = 25.046; params.C = 1.138; params.D = 8272.4; 
 params.m = 2108.0; params.Iz = 3954.288; params.lf = 1.47; params.lr = 1.50;
 
 % -------------------------------------------------------------------------
@@ -148,3 +148,7 @@ xlabel('Globális X [m]'); ylabel('Globális Y [m]');
 axis equal; grid on; legend show;
 
 save('my_pinn_model.mat', 'net', 'mu_in', 'sigma_in');
+
+pinn_net = net; % Itt a 'net' helyére írd azt, ami a Workspace-ben van
+
+save('trained_pinn_data.mat', 'pinn_net', 'mu_in', 'sigma_in');
