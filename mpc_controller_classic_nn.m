@@ -1,11 +1,6 @@
-function u_out = mpc_controller(input_vector)
-    % --- Bemenetek felbontása (Mux sorrendje változatlan) ---
-    % 1-2: vy, omega
-    % 3:   y_global (CarMaker nyers Y koordináta)
-    % 4:   psi (heading)
-    % 5:   u_prev (visszacsatolt kormányjel)
-    % 6:   t_curr (idő)
-    % 7:   vx_meas (CarMaker sebesség)
+function u_out = mpc_controller_classic_nn(input_vector)
+    % --- HAGYOMÁNYOS NEURÁLIS HÁLÓ ALAPÚ MPC ---
+    % Mux sorrend: [vy, omega, y_global, psi, u_prev, t_curr, vx_meas]
     
     persistent solver_impl last_du_guess y_start
     
@@ -19,7 +14,7 @@ function u_out = mpc_controller(input_vector)
     x_meas = [input_vector(1); input_vector(2); y_rel; input_vector(4)];
     u_prev = input_vector(5);
     t_curr = input_vector(6);
-    vx_meas = max(input_vector(7), 1.0); % 0-val való osztás elleni védelem
+    vx_meas = max(input_vector(7), 1.0); 
     
     % --- 2. Konfiguráció és Inicializálás ---
     N = 60;         
@@ -33,30 +28,43 @@ function u_out = mpc_controller(input_vector)
         
         import casadi.*
         
-        % PINN Adatok beolvasása a Workspace-ből
-        pinn_net = evalin('base', 'pinn_net');
-        mu_in = evalin('base', 'mu_in');
-        sigma_in = evalin('base', 'sigma_in');
+        % --- ITT A HAGYOMÁNYOS NN ADATOKAT OLVASSUK BE ---
+        nn_net = evalin('base', 'nn_net');
+        mu_in = evalin('base', 'mu_in_nn');        
+        sigma_in = evalin('base', 'sigma_in_nn');  
         
-        layers = pinn_net.Layers;
-        fc_idx = find(arrayfun(@(l) isa(l, 'nnet.cnn.layer.FullyConnectedLayer'), layers));
+        % =================================================================
+        % JAVÍTOTT RÉSZ: Manuális és fix súly-kicsomagolás az indexhiba ellen
+        % =================================================================
         W = {}; b = {};
-        for i = 1:length(fc_idx)
-            W{i} = casadi.MX(double(layers(fc_idx(i)).Weights)); 
-            b{i} = casadi.MX(double(layers(fc_idx(i)).Bias));
-        end
         
-        % Szimbolikus PINN funkció
+        % 1. Réteg (Bemenet -> 1. Rejtett réteg: 15 neuron)
+        W{1} = casadi.MX(double(nn_net.IW{1,1})); 
+        b{1} = casadi.MX(double(nn_net.b{1}));
+        
+        % 2. Réteg (1. Rejtett -> 2. Rejtett réteg: 10 neuron)
+        W{2} = casadi.MX(double(nn_net.LW{2,1})); 
+        b{2} = casadi.MX(double(nn_net.b{2}));
+        
+        % 3. Réteg (2. Rejtett -> Kimeneti réteg: 2 kimenet)
+        W{3} = casadi.MX(double(nn_net.LW{3,2})); 
+        b{3} = casadi.MX(double(nn_net.b{3}));
+        % =================================================================
+        
+        % Szimbolikus NN funkció felépítése
         u_s = casadi.MX.sym('u'); 
         vx_s = casadi.MX.sym('vx'); 
         x_v_s = casadi.MX.sym('x', 4);
         
+        % Bemeneti vektor (Kormányjel, sebesség, szögsebesség, vx*omega, konstans 0)
         raw_in = vertcat(u_s, vx_s, x_v_s(2), vx_s * x_v_s(2), 0); 
         h = (raw_in - casadi.MX(mu_in)) ./ casadi.MX(sigma_in);
-        for i = 1:length(W)-1
-            h = tanh(W{i} * h + b{i}); 
-        end
-        pinn_out = W{end} * h + b{end};
+        
+        % Előrecsatolás a 3 rétegen keresztül
+        h = tanh(W{1} * h + b{1}); 
+        h = tanh(W{2} * h + b{2});
+        pinn_out = W{3} * h + b{3}; % Utolsó rétegre nem teszünk tanh-t
+        
         nn_func = casadi.Function('nn_func', {u_s, vx_s, x_v_s}, {pinn_out});
         
         % --- MPC Struktúra ---
@@ -70,28 +78,24 @@ function u_out = mpc_controller(input_vector)
         curr_x = x0_s;
         curr_u = u_p_s;
         
-        % --- ANALITIKUS SZINUSZOS TRAJEKTÓRIA PARAMÉTEREI ---
-        amplitude = 3.0;  % Kilengés oldalra (méterben, pl. +-3 méter)
-        frequency = 0.2;  % Frekvencia (Hz) -> 5 másodpercenként egy teljes hullám
-        t_start = 1.0;    % A kígyózás kezdete (addig egyenesen megy, mint a sávváltásnál)
+        % --- Ugyanaz a szinuszos trajektória a fair összehasonlításhoz ---
+        amplitude = 3.0;  
+        frequency = 0.2;  
+        t_start = 1.0;    
         
         for k = 1:N
             curr_u = curr_u + dU(k);
             t_f = t_s + k * Ts;
             
-            % Ha kisebb az idő mint t_start, egyenesen megy (ref = 0)
-            % Ha nagyobb, elkezdi a szinuszos kígyózást
             ref_y = if_else(t_f < t_start, 0.0, ...
                             amplitude * sin(2 * pi * frequency * (t_f - t_start)));
             
-            % Az elméleti irányszög referencia (Psi_ref) a szinusz deriváltjából adódik:
-            % dy/dt = A * 2*pi*f * cos(...) -> ezt osztjuk vx-szel, hogy szöget kapjunk
             ref_psi = if_else(t_f < t_start, 0.0, ...
                               (amplitude * 2 * pi * frequency * cos(2 * pi * frequency * (t_f - t_start))) / vx_p_s);
             
             res = nn_func(curr_u, vx_p_s, curr_x);
             vy_next = res(1);
-            yaw_acc = res(2);
+            yaw_acc = res(2); 
             
             % Diszkrét dinamika predikció
             omega_next = curr_x(2) + yaw_acc * Ts;
@@ -100,13 +104,11 @@ function u_out = mpc_controller(input_vector)
             
             curr_x = vertcat(vy_next, omega_next, y_next, psi_next);
             
-            % Költségfüggvény (Finomhangolt súlyok a rángatás ellen)
-            obj = obj + 1500 * (curr_x(3) - ref_y)^2;     % Y pozíció hiba büntetése
-            obj = obj + 800 * (curr_x(4) - ref_psi)^2;   % Heading (Psi) hiba büntetése
-            obj = obj + 2000 * dU(k)^2;                   % Kormányrángatás szigorú büntetése
+            % TÖKÉLETESEN UGYANAZOK A SÚLYOK!
+            obj = obj + 1500 * (curr_x(3) - ref_y)^2;     
+            obj = obj + 800 * (curr_x(4) - ref_psi)^2;   
+            obj = obj + 2000 * dU(k)^2;                   
         end
-        
-        % Végállapot büntetése a stabilitásért
         obj = obj + 3000 * (curr_x(3) - ref_y)^2;
         
         nlp = struct('x', dU, 'f', obj, 'p', vertcat(x0_s, u_p_s, t_s, vx_p_s));
@@ -115,15 +117,10 @@ function u_out = mpc_controller(input_vector)
         last_du_guess = zeros(N, 1);
     end
     
-    % --- 3. Optimalizálás az aktuális lépésben ---
     p_values = [x_meas; u_prev; t_curr; vx_meas];
-    
-    % dU (kormánysebesség) korlátozása rad/sample-ben (szép sima átmenetet ad)
-    sol = solver_impl('x0', last_du_guess, 'p', p_values, ...
-                      'lbx', -0.015, 'ubx', 0.015);
+    sol = solver_impl('x0', last_du_guess, 'p', p_values, 'lbx', -0.015, 'ubx', 0.015);
     du_opt = full(sol.x);
-    last_du_guess = du_opt; 
+    last_du_guess = [du_opt(2:end); du_opt(end)]; 
     
-    % Abszolút kormányszög korlát (fizikai limit)
     u_out = max(min(u_prev + du_opt(1), 0.4), -0.4);
 end
