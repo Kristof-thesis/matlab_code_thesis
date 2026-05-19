@@ -121,3 +121,25 @@ xlabel('Idő [s]');
 ylabel('YawAcc [rad/s^2]');
 title('Legördülési gyorsulás becslése');
 legend show; grid on;
+
+% =========================================================================
+% EGYSZERŰSÍTETT MENTÉS AZ MPC SZÁMÁRA (Tiszta statisztikai számokkal)
+% =========================================================================
+
+nn_net = net; % Átnevezzük a hálót, hogy ne keveredjen a PINN-nel
+
+% Kiszámoljuk a bemeneti adatmátrixból soronként az átlagot és a szórást
+% Így pontosan 5 darab számunk lesz mindkét vektorban, amit az MPC használni tud
+mu_in_nn = mean(inputs, 2);  
+sigma_in_nn = std(inputs, 0, 2); 
+
+% Védelem: Ha valamelyik szórás 0 lenne (konstans sor), ne oszthassunk nullával az MPC-ben
+sigma_in_nn(sigma_in_nn == 0) = 1e-9; 
+
+% Elmentjük a fájlt, amit az mpc_controller_classic_nn be fog tölteni
+save('trained_classic_nn_data.mat', 'nn_net', 'mu_in_nn', 'sigma_in_nn');
+
+disp('------------------------------------------------------------');
+disp('A klasszikus hálózat és a normalizációs adatok elmentve!');
+disp('Fájl neve: trained_classic_nn_data.mat');
+disp('------------------------------------------------------------');
