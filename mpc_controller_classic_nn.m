@@ -33,9 +33,7 @@ function u_out = mpc_controller_classic_nn(input_vector)
         mu_in = evalin('base', 'mu_in_nn');        
         sigma_in = evalin('base', 'sigma_in_nn');  
         
-        % =================================================================
-        % JAVÍTOTT RÉSZ: Manuális és fix súly-kicsomagolás az indexhiba ellen
-        % =================================================================
+       
         W = {}; b = {};
         
         % 1. Réteg (Bemenet -> 1. Rejtett réteg: 15 neuron)
@@ -63,7 +61,7 @@ function u_out = mpc_controller_classic_nn(input_vector)
         % Előrecsatolás a 3 rétegen keresztül
         h = tanh(W{1} * h + b{1}); 
         h = tanh(W{2} * h + b{2});
-        pinn_out = W{3} * h + b{3}; % Utolsó rétegre nem teszünk tanh-t
+        pinn_out = W{3} * h + b{3}; 
         
         nn_func = casadi.Function('nn_func', {u_s, vx_s, x_v_s}, {pinn_out});
         

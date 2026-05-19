@@ -71,21 +71,18 @@ function u_out = mpc_controller(input_vector)
         curr_u = u_p_s;
         
         % --- ANALITIKUS SZINUSZOS TRAJEKTÓRIA PARAMÉTEREI ---
-        amplitude = 3.0;  % Kilengés oldalra (méterben, pl. +-3 méter)
-        frequency = 0.2;  % Frekvencia (Hz) -> 5 másodpercenként egy teljes hullám
-        t_start = 1.0;    % A kígyózás kezdete (addig egyenesen megy, mint a sávváltásnál)
+        amplitude = 3.0;  % Kilengés oldalra 
+        frequency = 0.2;  % Frekvencia (Hz) 
+        t_start = 1.0;    % A kígyózás kezdete 
         
         for k = 1:N
             curr_u = curr_u + dU(k);
             t_f = t_s + k * Ts;
-            
-            % Ha kisebb az idő mint t_start, egyenesen megy (ref = 0)
-            % Ha nagyobb, elkezdi a szinuszos kígyózást
+                      
             ref_y = if_else(t_f < t_start, 0.0, ...
                             amplitude * sin(2 * pi * frequency * (t_f - t_start)));
             
-            % Az elméleti irányszög referencia (Psi_ref) a szinusz deriváltjából adódik:
-            % dy/dt = A * 2*pi*f * cos(...) -> ezt osztjuk vx-szel, hogy szöget kapjunk
+
             ref_psi = if_else(t_f < t_start, 0.0, ...
                               (amplitude * 2 * pi * frequency * cos(2 * pi * frequency * (t_f - t_start))) / vx_p_s);
             
@@ -103,7 +100,7 @@ function u_out = mpc_controller(input_vector)
             % Költségfüggvény (Finomhangolt súlyok a rángatás ellen)
             obj = obj + 1500 * (curr_x(3) - ref_y)^2;     % Y pozíció hiba büntetése
             obj = obj + 800 * (curr_x(4) - ref_psi)^2;   % Heading (Psi) hiba büntetése
-            obj = obj + 2000 * dU(k)^2;                   % Kormányrángatás szigorú büntetése
+            obj = obj + 2000 * dU(k)^2;                   % Kormányrángatás büntetése
         end
         
         % Végállapot büntetése a stabilitásért
